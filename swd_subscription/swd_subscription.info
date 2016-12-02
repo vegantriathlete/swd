@@ -1,0 +1,6 @@
+name = Successful Web Developer Subscriptions
+description = Functionality to handle subscriptions
+package = Successful Web Developer
+core = 7.x
+
+dependencies[] = rules

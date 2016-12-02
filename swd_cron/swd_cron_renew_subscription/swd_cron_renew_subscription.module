@@ -1,0 +1,35 @@
+<?php
+
+/**
+ * @file
+ * Successful Web Developer Renew Subscriptions
+ *
+ */
+
+/**
+ * Implements hook_cron().
+ */
+function swd_cron_renew_subscription_cron() {
+  $query = 'SELECT bid.entity_id
+            FROM {field_data_field_billing_agreement_id} bid
+            LEFT JOIN {field_data_field_renewal_date} rd
+              ON rd.entity_id = bid.entity_id
+            WHERE bid.entity_type = :user
+              AND rd.entity_type = :user
+              AND field_billing_agreement_id_value <> :blank
+              AND field_renewal_date_value = :today';
+  $query_arguments = array(
+    ':user' => 'user',
+    ':blank' => '',
+    ':today' => date('Ymd'),
+  );
+  $products = swd_subscription_get_forum_subscription_product();
+  foreach ($products as $nid => $product) {
+    $product_node = node_load($nid);
+  }
+  $results = db_query($query, $query_arguments);
+  foreach ($results as $result) {
+    $account = user_load($result->entity_id);
+    swd_subscription_renew_subscription($account, $product_node);
+  }
+}

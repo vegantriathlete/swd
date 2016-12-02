@@ -1,0 +1,89 @@
+<?php
+
+/**
+ * @file
+ * Successful Web Developer Global Functions
+ *
+ * Functionality to handle global tweaks
+ */
+
+/**
+ * Implements hook_menu_link_alter().
+ */
+function swd_menu_link_alter(&$link) {
+  $alter_menu_links = array(
+    'Welcome',
+    'Who am I?',
+    'Why join?',
+    'How much does it cost?',
+    'Forums',
+  );
+  if ($link['menu_name'] == 'main-menu' && in_array($link['link_title'], $alter_menu_links)) {
+    $link['options']['alter'] = TRUE;
+  }
+}
+
+/**
+ * Implements hook_translated_menu_link_alter().
+ */
+function swd_translated_menu_link_alter(&$link, $map) {
+  $hide_menu_links_authenticated = array(
+    'Welcome',
+    'Who am I?',
+    'Why join?',
+    'How much does it cost?',
+  );
+  $hide_menu_links_lacking_forum_permission = array(
+    'Forums',
+  );
+  if ($link['menu_name'] == 'main-menu' && in_array($link['link_title'], $hide_menu_links_authenticated) && $GLOBALS['user']->uid) {
+    $link['hidden'] = 1;
+  }
+  if ($link['menu_name'] == 'main-menu' && in_array($link['link_title'], $hide_menu_links_lacking_forum_permission) && !user_access('create forum content')) {
+    $link['hidden'] = 1;
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function swd_form_user_profile_form_alter(&$form, &$form_state, $form_id) {
+  // I couldn't set this as required via Manage Fields because then a person
+  // would have to fill it out when requesting to create an account on the site.
+  $form['field_billing_period'][LANGUAGE_NONE]['#required'] = TRUE;
+  unset($form['field_billing_period'][LANGUAGE_NONE]['#options']['_none']);
+}
+
+/**
+ * Implements hook_menu_alter().
+ */
+function swd_menu_alter(&$items) {
+  $items['forum']['access callback'] = 'swd_forum_accesscheck';
+}
+
+/**
+ * Disallow access to /forum for the anonymous user.
+ */
+function swd_forum_accesscheck() {
+  return user_access('create forum content');
+}
+
+/**
+ * Implements hook_page_build().
+ */
+function swd_page_build(&$page) {
+  // Note: This is assuming that the active theme has a page_bottom region.
+  //       I don't want to install the Google Analytics contrib module just
+  //       to be able to add the code. It looks like it puts it in the
+  //       header anyway and I want this to be last on the page.
+  //       I could have created a .js file and had the theme include it.
+  //       I don't think I've got a way that I can have the theme put it
+  //       in the footer, though. So, I'm going this route even though
+  //       it relies on an assumption about the theme. If I happen to change
+  //       my custom theme and do not print out a page_bottom region, then
+  //       my GA tracking will suddenly stop working. This lengthy note is
+  //       meant to ensure that I know where to go about fixing things.
+  $page['page_bottom']['google_analytics'] = array(
+    '#markup' => "<script>(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){(i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)})(window,document,'script','https://www.google-analytics.com/analytics.js','ga');ga('create', 'UA-68385462-4', 'auto');ga('send', 'pageview');</script>",
+  );
+}

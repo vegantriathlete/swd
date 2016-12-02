@@ -1,0 +1,741 @@
+<?php
+
+/**
+ * @file
+ * Successful Web Developer Subscription
+ *
+ * Functionality to handle subscriptions
+ */
+
+define("API_USER", variable_get('swd_ec_user'));
+define("API_PWD", variable_get('swd_ec_password'));
+define("API_SIGNATURE", variable_get('swd_ec_signature'));
+define("PP_CHECKOUT_URL", variable_get('pp_ec_checkout_url'));
+define("PP_NVP_ENDPOINT", variable_get('pp_ec_nvp_endpoint'));
+define("PP_API_VERSION", variable_get('pp_ec_api_version'));
+define("PP_ENVIRONMENT", variable_get('pp_ec_environment'));
+define("RETURN_URL", variable_get('pp_return_url'));
+define("CANCEL_URL", variable_get('pp_cancel_url'));
+define("PP_BUTTON_CONTAINER", 'swd-subscription-build-subscription-form');
+
+/**
+ * Implements hook_menu().
+ */
+function swd_subscription_menu() {
+  $items = array(
+    'subscribe' => array(
+      'title' => 'Subscribe',
+      'description' => 'Subscribe to Successful Web Developer',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('swd_subscription_build_subscription_form'),
+      'access callback' => 'swd_subscription_access', 
+      'type' => MENU_CALLBACK,
+    ),
+    'subscribe/success' => array(
+      'title' => 'Thanks for subscribing!',
+      'description' => 'Process a successful subscription',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('swd_subscription_subscription_success_form'),
+      'access callback' => TRUE, 
+      'type' => MENU_CALLBACK,
+    ),
+    'subscribe/cancel' => array(
+      'title' => 'You have canceled the subscription process',
+      'description' => 'Process an aborted subscription',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('swd_subscription_subscription_cancel_form'),
+      'access callback' => TRUE, 
+      'type' => MENU_CALLBACK,
+    ),
+  );
+  return $items;
+}
+
+/**
+ * Access callback
+ */
+function swd_subscription_access() {
+  if ($GLOBALS['user']->uid) {
+    return TRUE;
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Form builder for Successful Web Developer Subscriptions
+ */
+function swd_subscription_build_subscription_form($form, &$form_state) {
+  $form = array();
+  $products = swd_subscription_get_forum_subscription_product();
+  $nids = array();
+  $form['container'] = array(
+    '#type' => 'container',
+    '#attributes' => array(
+      'id' => 'form-wrapper',
+    ),
+  );
+  foreach ($products as $nid => $product) {
+    $_SESSION['ProductNID'] = $nid;
+    $nids[] = $nid;
+    $form['container']['product_nids'] = array(
+      '#type' => 'value',
+      '#value' => $nids,
+    );
+    $_SESSION['ProductName'] = check_plain($product['title']);
+    $form['container']['product_name_' . $nid] = array(
+      '#type' => 'item',
+      '#markup' => check_plain($product['title']),
+    );
+    $_SESSION['ProductDescription'] = check_plain($product['description']);
+    $form['container']['product_description_' . $nid] = array(
+      '#type' => 'item',
+      '#markup' => filter_xss($product['description']),
+    );
+    $_SESSION['ProductMonthlyCharge'] = $product['monthly'];
+    $_SESSION['ProductAnnualCharge'] = $product['annual'];
+    $options = swd_subscription_get_product_options($form_state, $product);
+    $form['container']['product_options_' . $nid] = array(
+      '#type' => 'select',
+      '#options' => $options,
+      '#default_value' => isset($form_state['values']['product_options_' . $nid]) ? $form_state['values']['product_options_' . $nid] : 0,
+      '#ajax' => array(
+        'callback' => 'swd_subscription_ajax_callback',
+        'wrapper' => 'form-wrapper',
+      ),
+    );
+  }
+  $charge_amount = swd_subscription_calculate_charge_amount($form_state) . '.00';
+  $form['container']['charge_amount'] = array(
+    '#type' => 'item',
+    '#title' => t('Amount to be charged'),
+    '#markup' => $charge_amount,
+  );
+  $form['AMT'] = array(
+    '#type' => 'value',
+    '#value' => $charge_amount,
+  );
+  $form['actions'] = array(
+    '#type' => 'actions',
+  );
+  $form['actions']['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Submit'),
+  );
+  return $form;
+}
+
+/**
+ * Form submit validator
+ *
+ * @see swd_subscription_build_subscription_form
+ */
+function swd_subscription_build_subscription_form_validate($form, &$form_state) {
+  if ($form_state['values']['AMT'] == '0.00') {
+    form_set_error('charge_amount', t('You must select a billing amount.'));
+  }
+}
+
+/**
+ * Form submit handler
+ *
+ * @see swd_subscription_build_subscription_form
+ */
+function swd_subscription_build_subscription_form_submit($form, &$form_state) {
+  $account = user_load($GLOBALS['user']->uid);
+  $_SESSION['UID'] = $GLOBALS['user']->uid;
+  $amount = $form_state['values']['AMT'];
+  $item_name = $_SESSION['ProductName'];
+  $item_description = $_SESSION['ProductDescription'];
+  $response = swd_subscription_execute_auth_transaction($account, $amount, $item_name, $item_description);
+  $ack = strtoupper($response['ACK']);
+  if ($ack == 'SUCCESS' || $ack == 'SUCCESSWITHWARNING') {
+    $token = urldecode($response['TOKEN']);
+    $_SESSION['TOKEN'] = $token;
+    swd_subscription_redirect_to_paypal($response['TOKEN']);
+  } 
+  else {
+    $error_code = urldecode($response["L_ERRORCODE0"]);
+    $error_short_msg = urldecode($response["L_SHORTMESSAGE0"]);
+    $error_long_msg = urldecode($response["L_LONGMESSAGE0"]);
+    $error_severity_code = urldecode($response["L_SEVERITYCODE0"]);
+    $message = "SetExpressCheckout API Call Failed.\n";
+    $message .= "Detailed Error Message: @error_long_message\n";
+    $message .= "Short Error Message: @error_short_message\n";
+    $message .= "Error Code: @error_code\n";
+    $message .= "Error Severity Code: @error_severity_code\n";
+    drupal_set_message(t('There was an error processing your information.'), 'error');
+    drupal_set_message(t($message, array('@error_long_message' => $error_long_msg, '@error_short_message' => $error_short_msg, '@error_code' => $error_code, '@error_severity_code' => $error_severity_code)), 'error');
+    $form_state['rebuild'] = TRUE;
+  }
+}
+
+/**
+ * Get product billing period options
+ */
+function swd_subscription_get_product_options($form_state, $product) {
+  $options[0] = t('-None-');
+  $options[$product['monthly']] = t('Monthly: $') . $product['monthly'];
+  $options[$product['annual']] = t('Annual: $') . $product['annual'];
+  return $options;
+}
+
+/**
+ * Get the forum subscription product
+ *
+ * @return array $product
+ *   An associative array keyed by the product NID
+ */
+function swd_subscription_get_forum_subscription_product($account = NULL) {
+  // Note: This code was copied from a more complex situation.
+  //       For the moment I am keeping things very simple.
+  //       I have only the one product, the forum subscription.
+  //       I am limiting the query to one result and have changed
+  //       the array name to be singular instead of plural.
+  if (!isset($account)) {
+    $account = user_load($GLOBALS['user']->uid);
+  }
+  $product = array();
+  $query = 'SELECT nid
+            FROM {node}
+            WHERE type = :product
+              AND status = :published
+            LIMIT 1';
+  $query_args = array(
+    ':product' => 'product',
+    ':published' => 1,
+  );
+  $results = db_query($query, $query_args);
+  foreach ($results as $result) {
+    $product_node = node_load($result->nid);
+    $prices = swd_subscription_get_product_pricing($product_node, $account);
+    $product[$product_node->nid] = array(
+      'title' => $product_node->title,
+      'description' => isset($product_node->body[LANGUAGE_NONE][0]['value']) ? $product_node->body[LANGUAGE_NONE][0]['value'] : '',
+      'monthly' => $prices['monthly'],
+      'annual' => $prices['annual'],
+    );
+  }
+  return $product;
+}
+
+/**
+ * Determine the price for the product
+ *
+ * @param object $product
+ *   The fully loaded node for the product
+ * @param object $account
+ *   The fully loaded account entity
+ * @return array $prices
+ *   An associative array with the monthly and annual price
+ */
+function swd_subscription_get_product_pricing($product, $account) {
+  $prices = array();
+  // Note: At the moment I've only got one product and I'm storing the lifetime
+  //       rates in the user account. If I add more products, I'll probably need to
+  //       add a multi-value field that has the information for each product / subscription
+  //       and then this logic will need to be updated accordingly.
+  if (isset($account->field_monthly_cost[LANGUAGE_NONE][0]['value']) && trim($account->field_monthly_cost[LANGUAGE_NONE][0]['value']) != '') {
+    $prices['monthly'] = $account->field_monthly_cost[LANGUAGE_NONE][0]['value'];
+  }
+  else {
+    $prices['monthly'] = $product->field_monthly_cost[LANGUAGE_NONE][0]['value'];
+  }
+  if (isset($account->field_annual_cost[LANGUAGE_NONE][0]['value']) && trim($account->field_annual_cost[LANGUAGE_NONE][0]['value']) != '') {
+    $prices['annual'] = $account->field_annual_cost[LANGUAGE_NONE][0]['value'];
+  }
+  else {
+    $prices['annual'] = $product->field_annual_cost[LANGUAGE_NONE][0]['value'];
+  }
+  return $prices;
+}
+
+/**
+ * Ajax callback for select options
+ */
+function swd_subscription_ajax_callback($form, $form_state) {
+  return $form['container'];
+}
+
+/**
+ * Calculate the amount to be charged based on selections
+ *
+ * @param array $form_state
+ *   The values of the form
+ * @return integer $charge_amount
+ *   The total amount to charge based on selections
+ */
+function swd_subscription_calculate_charge_amount($form_state) {
+  $charge_amount = 0;
+  if (isset($form_state['values']['product_nids'])) {
+    foreach ($form_state['values']['product_nids'] as $nid) {
+      $charge_amount += $form_state['values']['product_options_' . $nid];
+    }
+  }
+  $_SESSION['ChargeAmount'] = $charge_amount;
+  return $charge_amount;
+}
+
+/**
+ * Complete a sale transaction from the website
+ *
+ * @param object $account
+ *   The fully loaded user account to be charged
+ * @param string $amount
+ *   The dollar amount to be charged in the format [0-9][0-9]*.[0-9][0-9]
+ * @return array $response
+ *   The response from the PayPal server
+ */
+function swd_subscription_execute_auth_transaction($account, $amount, $item_name, $item_description) {
+  // Note: At the moment I have only one product on the subscription page.
+  //       If I add more products, I will need another argument and also will need
+  //       to update the logic to loop through the items.
+  $nvp = 'PAYMENTREQUEST_0_AMT=' . urlencode($amount);
+  $_SESSION['Payment_Amount']= $amount;
+  $nvp .= '&PAYMENTREQUEST_0_PAYMENTACTION=Authorization';
+  $nvp .= '&L_BILLINGTYPE0=MerchantInitiatedBillingSingleAgreement';
+  $nvp .= '&L_BILLINGAGREEMENTDESCRIPTION0=Automatically+Renew+Subscription';
+  $nvp .= '&RETURNURL=' . urlencode(RETURN_URL);
+  $nvp .= '&CANCELURL=' . urlencode(CANCEL_URL);
+  $nvp .= '&PAYMENTREQUEST_0_CURRENCYCODE=USD';
+  $_SESSION['currencyCodeType'] = 'USD';
+  $nvp .= '&PAYMENTREQUEST_0_ITEMAMT=' . urlencode($amount);
+  $_SESSION['itemAmt']= $amount;
+  $nvp .= '&L_PAYMENTREQUEST_0_NAME0=' . urlencode($item_name);
+  $nvp .= '&L_PAYMENTREQUEST_0_DESC0=' . urlencode($item_description);
+  $nvp .= '&L_PAYMENTREQUEST_0_AMT0=' . urlencode($amount);
+  $nvp .= '&L_PAYMENTREQUEST_0_QTY0=1';
+  $nvp .= '&NOSHIPPING=1';
+  $response = swd_subscription_execute_api_call('SetExpressCheckout', $nvp);
+  return $response;
+}
+
+/**
+ * Calculate a renewal date
+ *
+ * @param timestamp $base_date
+ *   The base date using Unix timestamp
+ * @param string $billing_period
+ *   The billing period (monthly, annual)
+ * @return string $renewal_date
+ *   The renewal date (YYYYMMDD)
+ */
+function swd_subscription_calculate_renewal_date($base_date, $billing_period) {
+  switch ($billing_period) {
+    case 'monthly':
+      $offset = 30 * 24 * 60 * 60;
+      break;
+    case 'annual':
+      $offset = 365 * 24 * 60 * 60;
+      break;
+    default:
+      $offset = 0;
+  }
+  $new_date = $base_date + $offset;
+  $renewal_date = date('Ymd', $new_date);
+  return $renewal_date;
+}
+
+/**
+ * Charge a customer's account with a reference transaction
+ *
+ * @param object $account
+ *   The fully loaded user account to be charged
+ * @param string $amount
+ *   The dollar amount to be charged in the format [0-9][0-9]*.[0-9][0-9]
+ */
+function swd_subscription_execute_reference_transaction($account, $amount, $currency_code = 'USD', $payment_action = 'Sale') {
+  $nvp = 'REFERENCEID=' . urlencode($account->field_billing_agreement_id[LANGUAGE_NONE][0]['value']);
+  $nvp .= '&AMT=' . urlencode($amount);
+  $nvp .= '&CURRENCYCODE=' . urlencode($currency_code);
+  $nvp .= '&PAYMENTACTION=' . urlencode($payment_action);
+  $response = swd_subscription_execute_api_call('DoReferenceTransaction', $nvp);
+  return $response;
+}
+
+/**
+ * Connect with the PayPal server
+ *
+ * @param string $method
+ *   The method to execute
+ * @param string $nvp
+ *   The name-value pairs
+ * @return array $response
+ *   The response from the PayPal server
+ */
+function swd_subscription_execute_api_call($method, $nvp) {
+
+  // Prepare the name-value pair string
+  $nvp_request = 'METHOD=' . urlencode($method);
+  $nvp_request .= '&VERSION=' . urlencode(PP_API_VERSION);
+  $nvp_request .= '&USER=' . urlencode(API_USER);
+  $nvp_request .= '&PWD=' . urlencode(API_PWD);
+  $nvp_request .= '&SIGNATURE=' . urlencode(API_SIGNATURE);
+  $nvp_request .= '&' . $nvp;
+
+  // Setup the cURL request.
+  $ch = curl_init();
+  curl_setopt($ch, CURLOPT_URL, PP_NVP_ENDPOINT);
+  curl_setopt($ch, CURLOPT_VERBOSE, 1);
+  curl_setopt($ch, CURLOPT_POST, 1);
+  curl_setopt($ch, CURLOPT_POSTFIELDS, $nvp_request);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+  curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
+  curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+  curl_setopt($ch, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+  curl_setopt($ch, CURLOPT_NOPROGRESS, 1);
+  curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 0);
+  $result = curl_exec($ch);
+  
+  // Log any errors to the watchdog.
+  if ($error = curl_error($ch)) {
+    // Do NOT log the $nvp or $nvp_request string, as they may contain
+    // the credit card information!
+    watchdog('swd_subscription', 'cURL error at !url: @error', array('!url' => API_ENDPOINT, '@error' => $error), WATCHDOG_ERROR);
+    return FALSE;
+  }
+  curl_close($ch);
+
+  // Make the response an array and trim off the encapsulating characters.
+  $response = explode('&', $result);
+  
+  $return = array();
+  for ($i = 0; $i < count($response); $i++) {
+    $kv = explode('=', $response[$i]);
+    $return[urldecode($kv[0])] = urldecode($kv[1]);
+  }
+
+  return $return;
+}
+
+/**
+ * Renew a subscription for an account
+ *
+ * @param object $account
+ *   The user account for which the subscription should be renewed
+ * @param object $product
+ *   The fully loaded node object for the product
+ */
+function swd_subscription_renew_subscription($account, $product) {
+  $amount = NULL;
+  if (isset($account->field_billing_period[LANGUAGE_NONE][0]['value'])) {
+    $billing_period = $account->field_billing_period[LANGUAGE_NONE][0]['value'];
+    $amount = swd_subscription_retrieve_subscription_charge($account, $account->field_billing_period[LANGUAGE_NONE][0]['value']);
+    $response = swd_subscription_execute_reference_transaction($account, $amount);
+    $ack = strtoupper($response['ACK']);
+    if ($ack != 'SUCCESS' && $ack != 'SUCCESSWITHWARNING') {
+      watchdog('swd_subscription', t('There was an error processing the transaction for account: @account in the amount of @amount. The error message was: @error.', array('@account' => $account->name, '@amount' => $amount, '@error' => urldecode($response['L_LONGMESSAGE0']))));
+      rules_invoke_event('swd_subscription_renewal_failure', $account, $product, $amount);
+    }
+    else {
+      $renewal_date = swd_subscription_calculate_account_subscription_renewal_date($account, $billing_period);
+      if ($renewal_date) {
+        rules_invoke_event('swd_subscription_renewal_success', $account, $billing_period, $renewal_date);
+      }
+      else {
+        rules_invoke_event('swd_subscription_missing_renewal_information', $account, $amount, $billing_period, $renewal_date);
+      }
+    }
+  }
+  else {
+    rules_invoke_event('swd_subscription_renewal_failure', $account, $product_node, $amount);
+  }
+}
+
+/**
+ * Calculate the renewal date for an account's subscription
+ *
+ * @param object $account
+ *   The user account for which the subscription should be renewed
+ * @param string $billing_period
+ *   The billing period for the account's subscription
+ * @return string $renewal_date
+ *   The YYYYMMDD renewal date
+ */
+function swd_subscription_calculate_account_subscription_renewal_date($account, $billing_period) {
+  $renewal_date = $account->field_renewal_date[LANGUAGE_NONE][0]['value'];
+  if ($renewal_date) {
+    $base_date = strtotime($renewal_date); 
+    $renewal_date = swd_subscription_calculate_renewal_date($base_date, $billing_period);
+    return $renewal_date;
+  }
+  else {
+    return NULL;
+  }
+}
+
+/**
+ * Retrieve the charge for a subscription
+ *
+ * @param object $account
+ *   The fully loaded user entity
+ * @param string $billing_period
+ *   The billing period to be charged
+ * @return string $charge
+ *   The charge for the billing period. Example: 49.00
+ */
+function swd_subscription_retrieve_subscription_charge($account, $billing_period) {
+  $amount = '';
+  $field = 'field_' . $billing_period . '_cost';
+  $field_data = $account->{$field};
+  if (isset($field_data[LANGUAGE_NONE][0]['value'])) {
+    $unformatted_amount = $field_data[LANGUAGE_NONE][0]['value'];
+    $amount = swd_subscription_format_dollar_amount($unformatted_amount);
+  }
+  return $amount;
+}
+
+/**
+ * Format a dollar amount to pass as a variable in a transaction
+ *
+ * @param integer $unformatted_amount
+ *   The amount to be formatted
+ * @return string $amount
+ *   The formatted amount
+ */
+function swd_subscription_format_dollar_amount($unformatted_amount) {
+  $amount = $unformatted_amount . '.00';
+  return $amount;
+}
+
+/**
+ * Redirect to the PayPal server
+ *
+ * @param string $token
+ *   The token that was sent in a response to the SetExpressCheckout call
+ */
+function swd_subscription_redirect_to_paypal($token) {
+  // Note: It is assumed that the token that is passed into this function
+  //       is already URL Encoded.
+  // @todo: I might want to clean this up so that it uses drupal_goto.
+  //        I'll need to also use the $options argument to pass the query arguments.
+  $paypal_url = PP_CHECKOUT_URL . $token . '&useraction=commit';
+  header("Location:" . $paypal_url);
+  exit;
+}
+
+/**
+ * Form builder for the subscription success
+ */
+function swd_subscription_subscription_success_form($form, &$form_state) {
+  $payment_amount =  $_SESSION['Payment_Amount'];
+  $account = user_load($_SESSION['UID']);
+  $product = node_load($_SESSION['ProductNID']);
+  if (!isset($_SESSION['payer_id'])) {
+    $_SESSION['payer_id'] = $_GET['PayerID'];
+  }
+  $token = '';
+  if (isset($_REQUEST['token'])) {
+    $token = $_REQUEST['token'];
+  }
+  elseif (isset($_SESSION['TOKEN'])) {
+    $token = $_SESSION['TOKEN'];
+  }
+
+  $create_billing_agreement_response = swd_subscription_create_billing_agreement();
+  $ack = strtoupper($create_billing_agreement_response['ACK']);
+  if (!isset($create_billing_agreement_response['BILLINGAGREEMENTID']) || ($ack != 'SUCCESS' && $ack != 'SUCCESSWITHWARNING') ) {
+    watchdog('swd_subscription', '<pre>' . print_r($create_billing_agreement_response, 1) . '</pre>');
+    rules_invoke_event('swd_subscription_baid_error', $account, print_r($create_billing_agreement_response, 1));
+    drupal_set_title(t('Error creating billing agreement'), PASS_THROUGH);
+    $form['notice'] = array(
+      '#type' => 'item',
+      '#markup' => '<p>' . t('We were unable to creating a billing agreement. Your account was NOT charged and your subscription has not been processed. Please contact us with any information you have about this transaction. A screen shot would be helpful.') . '</p>',
+    );
+    $form['debug_create_billing_agreement'] = array(
+      '#type' => 'item',
+      '#markup' => '<pre>' . print_r($create_billing_agreement_response, 1) . '</pre>',
+    );
+    swd_subscription_clear_session_variables();
+    return $form;
+  }
+  $billing_agreement_id = $create_billing_agreement_response['BILLINGAGREEMENTID'];
+
+  $do_express_checkout_response = swd_subscription_confirm_payment($payment_amount);
+  $do_express_checkout_ack = strtoupper($do_express_checkout_response['ACK']);
+  if ($do_express_checkout_ack == 'SUCCESS' || $do_express_checkout_ack == 'SUCCESSWITHWARNING') {
+    $bill_amount = $_SESSION['ChargeAmount'];
+    $billing_period = $bill_amount == $_SESSION['ProductMonthlyCharge'] ? 'monthly' : 'annual';
+    if (isset($account->field_renewal_date[LANGUAGE_NONE][0]['value'])) {
+      $renewal_date = swd_subscription_calculate_renewal_date(strtotime($account->field_renewal_date[LANGUAGE_NONE][0]['value']), $billing_period);
+    }
+    else {
+      $renewal_date = swd_subscription_calculate_renewal_date(time(), $billing_period);
+    }
+    $account_wrapper = entity_metadata_wrapper('user', $account);
+    $account_wrapper->field_billing_agreement_id->set($billing_agreement_id);
+    $account_wrapper->field_monthly_cost->set($_SESSION['ProductMonthlyCharge']);
+    $account_wrapper->field_annual_cost->set($_SESSION['ProductAnnualCharge']);
+    $account_wrapper->field_renewal_date->set($renewal_date);
+    $account_wrapper->field_billing_period->set($billing_period);
+    $account_wrapper->save();
+    rules_invoke_event('swd_subscription_purchase', $account, $product, $billing_period, $renewal_date);
+    $transactionId = $do_express_checkout_response['PAYMENTINFO_0_TRANSACTIONID'];
+    $transactionType = $do_express_checkout_response['PAYMENTINFO_0_TRANSACTIONTYPE'];
+    $paymentType = $do_express_checkout_response['PAYMENTINFO_0_PAYMENTTYPE'];
+    $orderTime = $do_express_checkout_response['PAYMENTINFO_0_ORDERTIME'];
+    $amt = $do_express_checkout_response['PAYMENTINFO_0_AMT'];
+    $currencyCode	= $do_express_checkout_response['PAYMENTINFO_0_CURRENCYCODE'];
+    $paymentStatus = $do_express_checkout_response['PAYMENTINFO_0_PAYMENTSTATUS'];
+    $pendingReason = $do_express_checkout_response['PAYMENTINFO_0_PENDINGREASON'];
+    $reasonCode = $do_express_checkout_response['PAYMENTINFO_0_REASONCODE'];
+
+    $form['heading'] = array(
+      '#type' => 'markup',
+      '#markup' => '<h2>Thank you for your Order </h2>',
+    );
+    $form['txid'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Transaction ID: ' . $transactionId . '</p>',
+    );
+    $form['txtype'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Transaction Type: ' . $transactionType . '</p>',
+    );
+    $form['paymenttotal'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Payment Total Amount: ' . $amt . '</p>',
+    );
+    $form['currencycode'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Currency Code: ' . $currencyCode . '</p>',
+    );
+    $form['paymentstatus'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Payment Status: ' . $paymentStatus . '</p>',
+    );
+    if ($pendingReason) {
+      $form['pendingreason'] = array(
+        '#type' => 'markup',
+        '#markup' => '<p>Pending Reason: ' . $pendingReason . '</p>',
+      );
+    }
+    if ($reasonCode) {
+      $form['reasoncode'] = array(
+        '#type' => 'markup',
+        '#markup' => '<p>Reason Code: ' . $reasonCode . '</p>',
+      );
+    }
+    $form['paymenttype'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Payment Type: ' . $paymentType . '</p>',
+    );
+    $form['billingagreementid'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Billing Agreement ID: ' . $billing_agreement_id . '</p>',
+    );
+  }
+  else {
+    $ErrorCode = urldecode($do_express_checkout_response['L_ERRORCODE0']);
+    $ErrorShortMsg = urldecode($do_express_checkout_response['L_SHORTMESSAGE0']);
+    $ErrorLongMsg = urldecode($do_express_checkout_response['L_LONGMESSAGE0']);
+    $ErrorSeverityCode = urldecode($do_express_checkout_response['L_SEVERITYCODE0']);
+
+    drupal_set_title(t('Error capturing payment'), PASS_THROUGH);
+    $form['failure'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>' . t('Your payment was NOT processed successfully! Please contact us immediately so that we may take corrective action. More details appear below. It would be helpful if you take a screen shot.') . '</p>',
+    );
+    $form['error'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>DoExpressCheckout API call failed.</p>',
+    );
+    $form['error_message'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Detailed Error Message: ' . $ErrorLongMsg . '</p>',
+    );
+    $form['error_msg'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Short Error Message: ' . $ErrorShortMsg . '</p>',
+    );
+    $form['error_code'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Error Code: ' . $ErrorCode . '</p>',
+    );
+    $form['error_severity'] = array(
+      '#type' => 'markup',
+      '#markup' => '<p>Error Severity Code: ' . $ErrorSeverityCode . '</p>',
+    );
+  }
+  swd_subscription_clear_session_variables();
+  return $form;
+}
+
+function swd_subscription_create_billing_agreement() {
+  if(isset($_SESSION['TOKEN'])) {
+    $nvpstr = 'TOKEN=' . urlencode($_SESSION['TOKEN']);
+  }
+  $response = swd_subscription_execute_api_call('CreateBillingAgreement', $nvpstr);
+  return $response;
+}
+
+function swd_subscription_confirm_payment($amount) {
+  if (isset($_SESSION['TOKEN'])) {
+    $nvpstr = 'TOKEN=' . urlencode($_SESSION['TOKEN']);
+  }
+  else {
+    $nvpstr = 'TOKEN=NULL';
+  }
+
+  if (isset($_SESSION['payer_id'])) {
+    $nvpstr .= '&PAYERID=' . urlencode($_SESSION['payer_id']);
+  }
+  else {
+    $nvpstr .= '&PAYERID=NULL';
+  }
+
+  $nvpstr .= '&PAYMENTREQUEST_0_PAYMENTACTION=Sale';
+
+  if (isset($_SERVER['SERVER_NAME'])) {
+    $nvpstr .= '&IPADDRESS=' . urlencode($_SERVER['SERVER_NAME']);
+  }
+
+  $nvpstr .= '&PAYMENTREQUEST_0_AMT=' . $amount;
+
+  if (isset($_SESSION['currencyCodeType'])) {
+    $nvpstr .= '&PAYMENTREQUEST_0_CURRENCYCODE=' . urlencode($_SESSION['currencyCodeType']);
+  }
+
+  if (isset($_SESSION['itemAmt'])) {
+    $nvpstr = $nvpstr . '&PAYMENTREQUEST_0_ITEMAMT=' . urlencode($_SESSION['itemAmt']);
+  }
+
+  $response = swd_subscription_execute_api_call('DoExpressCheckoutPayment', $nvpstr);
+  return $response;
+}
+
+/**
+ * Form builder for the subscription cancel
+ */
+function swd_subscription_subscription_cancel_form($form, &$form_state) {
+  $form = array();
+  $form['message'] = array(
+    '#type' => 'markup',
+    '#markup' => '<p>You canceled the transaction.</p>',
+  );
+  return $form;
+}
+
+/**
+ * Clear the $_SESSION variables
+ */
+function swd_subscription_clear_session_variables() {
+  $variables = array(
+    'ProductNID',
+    'ProductName',
+    'ProductDescription',
+    'ProductMonthlyCharge',
+    'ProductAnnualCharge',
+    'UID',
+    'TOKEN',
+    'ChargeAmount',
+    'Payment_Amount',
+    'currencyCodeType',
+    'itemAmt',
+    'payer_id',
+  );
+  foreach ($variables as $variable) {
+    unset($_SESSION[$variable]);
+  }
+}

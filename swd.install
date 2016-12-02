@@ -1,0 +1,14 @@
+<?php
+
+/**
+ * Implements hook_enable().
+ */
+function swd_enable() {
+  db_update('system')
+    ->fields(array(
+      'weight' => 88,
+    ))
+    ->condition('type', 'module')
+    ->condition('name', 'swd')
+    ->execute();
+}

@@ -1,0 +1,6 @@
+name = Successful Web Developer Renew Subscriptions
+description = Functionality to handle automatically renewing subscriptions
+package = Successful Web Developer
+core = 7.x
+
+dependencies[] = swd_subscription

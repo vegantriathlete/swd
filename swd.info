@@ -1,0 +1,4 @@
+name = Successful Web Developer Global Functions
+description = Functionality to handle global tweaks
+package = Successful Web Developer
+core = 7.x
