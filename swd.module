@@ -36,7 +36,7 @@ function swd_translated_menu_link_alter(&$link, $map) {
   $hide_menu_links_lacking_forum_permission = array(
     'Forums',
   );
-  if ($link['menu_name'] == 'main-menu' && in_array($link['link_title'], $hide_menu_links_authenticated) && $GLOBALS['user']->uid) {
+  if ($link['menu_name'] == 'main-menu' && in_array($link['link_title'], $hide_menu_links_authenticated) && $GLOBALS['user']->uid && $GLOBALS['user']->uid != 1) {
     $link['hidden'] = 1;
   }
   if ($link['menu_name'] == 'main-menu' && in_array($link['link_title'], $hide_menu_links_lacking_forum_permission) && !user_access('create forum content')) {
